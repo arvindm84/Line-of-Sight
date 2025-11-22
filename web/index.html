@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Visual guide application for blind users">
+    <title>Visual Guide - Nearby Locations</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+    <div id="app">
+        <!-- Camera View -->
+        <div id="camera-container">
+            <video id="camera-feed" autoplay playsinline"></video>
+            <canvas id="capture-canvas" style="display: none;"></canvas>
+        </div>
+
+        <!-- Status Overlay -->
+        <div id="status-overlay">
+            <div id="location-status" aria-live="polite">
+                <span id="location-text">Starting...</span>
+            </div>
+            <div id="api-status" aria-live="polite">
+                <span id="api-text">Initializing...</span>
+            </div>
+        </div>
+
+        <!-- Output Display -->
+        <div id="output-panel" aria-live="polite">
+            <h2>Nearby Locations</h2>
+            <ul id="landmarks-list"></ul>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="js/utils.js"></script>
+    <script src="js/camera.js"></script>
+    <script src="js/location.js"></script>
+    <script src="js/openstreetmap.js"></script>
+    <script src="js/main.js"></script>
+</body>
+
+</html>
