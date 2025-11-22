@@ -1,8 +1,8 @@
 import ffmpeg
 import cv2
 
-input_video = "./sample_vid1.mp4"
-output_pattern = "frames/frame_%04d.png" # Output directory and file naming pattern
+input_video = "./media/sample_vid1.mp4"
+output_pattern = "./media/frames/frame_%04d.png" # Output directory and file naming pattern
 
 (
     ffmpeg
