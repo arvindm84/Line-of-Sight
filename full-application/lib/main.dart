@@ -91,7 +91,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _geminiService = GeminiService(geminiApiKey);
     
     // Initialize Fish Audio service with API key
-    final fishApiKey = dotenv.env['FISH_AUDIO_KEY'] ?? dotenv.env['FISH_AUDIO_API_KEY'] ?? '';
+    final fishApiKey = dotenv.env['FISH_AUDIO_API_KEY'] ?? dotenv.env['FISH_API_KEY'] ?? '';
     if (fishApiKey.isEmpty) {
       setState(() => _statusText = "Error: Missing Fish Audio API key");
       _log("Init", "Error: Missing Fish Audio API key. Available keys: ${dotenv.env.keys}");
