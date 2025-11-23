@@ -47,6 +47,7 @@ class _HomeScreenState extends State<HomeScreen> {
   String _statusText = "Initializing...";
   List<POI> _nearbyPOIs = [];
   bool _isScanning = false;
+  bool _isCameraActive = false; // Controls camera display
   Timer? _scanTimer;
   Position? _currentPosition;
 
@@ -63,10 +64,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _isScanning = true;
-      _statusText = "Scanning active";
+      _statusText = "Ready";
     });
 
-    // Start periodic scan (every 5 seconds)
+    // Start periodic scan (every 5 seconds) - runs in background
     _scanTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       _performScan();
     });
@@ -110,7 +111,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted || _currentPosition == null) return;
 
     try {
-      // Fetch POIs based on current location
+      // Fetch POIs based on current location (continues in background)
       final results = await _osmService.getNearbyPOIs(
           _currentPosition!.latitude,
           _currentPosition!.longitude
@@ -127,6 +128,12 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  void _toggleCamera() {
+    setState(() {
+      _isCameraActive = !_isCameraActive;
+    });
+  }
+
   @override
   void dispose() {
     controller?.dispose();
@@ -140,43 +147,45 @@ class _HomeScreenState extends State<HomeScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // TOP SECTION: Camera Feed with 9:20 aspect ratio (vertical)
+            // TOP SECTION: Camera Feed (fills naturally without aspect ratio constraints)
             Expanded(
-              flex: 3,
+              flex: 4,
               child: Container(
                 color: Colors.black,
-                child: Center(
-                  child: AspectRatio(
-                    aspectRatio: 9 / 20, // 9:20 aspect ratio for vertical video
-                    child: controller != null && controller!.value.isInitialized
-                        ? ClipRect(
-                            child: FittedBox(
-                              fit: BoxFit.cover,
-                              child: SizedBox(
-                                width: controller!.value.previewSize!.width,
-                                height: controller!.value.previewSize!.height,
-                                child: CameraPreview(controller!),
-                              ),
-                            ),
-                          )
-                        : Container(
-                            color: Colors.black,
-                            child: const Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  CircularProgressIndicator(color: Colors.white),
-                                  SizedBox(height: 16),
-                                  Text(
-                                    'Initializing camera...',
-                                    style: TextStyle(color: Colors.white70),
-                                  ),
-                                ],
-                              ),
+                child: _isCameraActive && controller != null && controller!.value.isInitialized
+                    ? ClipRect(
+                        child: OverflowBox(
+                          alignment: Alignment.center,
+                          child: FittedBox(
+                            fit: BoxFit.cover,
+                            child: SizedBox(
+                              width: MediaQuery.of(context).size.width,
+                              height: MediaQuery.of(context).size.width * controller!.value.aspectRatio,
+                              child: CameraPreview(controller!),
                             ),
                           ),
-                  ),
-                ),
+                        ),
+                      )
+                    : Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.camera_alt,
+                              size: 80,
+                              color: Colors.white30,
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              _isCameraActive ? 'Starting camera...' : 'Camera inactive',
+                              style: TextStyle(
+                                color: Colors.white38,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
               ),
             ),
             
@@ -193,12 +202,11 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             
-            // BOTTOM SECTION: Location Information
+            // BOTTOM SECTION: Start/Stop Button
             Expanded(
-              flex: 2,
+              flex: 1,
               child: Container(
                 width: double.infinity,
-                padding: const EdgeInsets.all(20),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.topLeft,
@@ -209,166 +217,70 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Status indicator
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Center(
+                  child: ElevatedButton(
+                    onPressed: _toggleCamera,
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 60, vertical: 20),
+                      backgroundColor: Colors.transparent,
+                      shadowColor: Colors.transparent,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(30),
+                      ),
+                    ).copyWith(
+                      backgroundColor: MaterialStateProperty.resolveWith<Color>(
+                        (Set<MaterialState> states) {
+                          return Colors.transparent;
+                        },
+                      ),
+                    ),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 40, vertical: 16),
                       decoration: BoxDecoration(
-                        color: Colors.black.withOpacity(0.7),
-                        borderRadius: BorderRadius.circular(8),
+                        gradient: LinearGradient(
+                          colors: _isCameraActive
+                              ? [
+                                  const Color(0xFFea5455),
+                                  const Color(0xFFf07167),
+                                ]
+                              : [
+                                  const Color(0xFF667eea),
+                                  const Color(0xFF764ba2),
+                                ],
+                        ),
+                        borderRadius: BorderRadius.circular(30),
+                        boxShadow: [
+                          BoxShadow(
+                            color: (_isCameraActive 
+                                ? const Color(0xFFea5455) 
+                                : const Color(0xFF667eea)).withOpacity(0.5),
+                            blurRadius: 20,
+                            spreadRadius: 2,
+                          ),
+                        ],
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Container(
-                            width: 8,
-                            height: 8,
-                            decoration: BoxDecoration(
-                              color: _isScanning ? Colors.green : Colors.red,
-                              shape: BoxShape.circle,
-                            ),
+                          Icon(
+                            _isCameraActive ? Icons.stop : Icons.play_arrow,
+                            color: Colors.white,
+                            size: 28,
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 12),
                           Text(
-                            _statusText,
-                            style: const TextStyle(color: Colors.white, fontSize: 14),
+                            _isCameraActive ? 'STOP' : 'START',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 1.5,
+                            ),
                           ),
                         ],
                       ),
                     ),
-                    const SizedBox(height: 20),
-                    
-                    // Nearby Locations Title
-                    const Text(
-                      "Top 5 Nearby Locations",
-                      style: TextStyle(
-                        color: Color(0xFF667eea),
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    
-                    // Location List
-                    Expanded(
-                      child: _nearbyPOIs.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  CircularProgressIndicator(
-                                    color: Color(0xFF667eea),
-                                  ),
-                                  const SizedBox(height: 16),
-                                  const Text(
-                                    "Searching for nearby locations...",
-                                    style: TextStyle(color: Colors.grey, fontSize: 16),
-                                  ),
-                                ],
-                              ),
-                            )
-                          : ListView.builder(
-                              itemCount: _nearbyPOIs.length,
-                              itemBuilder: (context, index) {
-                                final poi = _nearbyPOIs[index];
-                                return Container(
-                                  margin: const EdgeInsets.only(bottom: 12),
-                                  padding: const EdgeInsets.all(16),
-                                  decoration: BoxDecoration(
-                                    gradient: LinearGradient(
-                                      colors: [
-                                        const Color(0xFF667eea).withOpacity(0.3),
-                                        const Color(0xFF764ba2).withOpacity(0.3),
-                                      ],
-                                    ),
-                                    borderRadius: BorderRadius.circular(12),
-                                    border: Border.all(
-                                      color: const Color(0xFF667eea).withOpacity(0.5),
-                                      width: 1,
-                                    ),
-                                  ),
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          Container(
-                                            width: 32,
-                                            height: 32,
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xFF667eea),
-                                              borderRadius: BorderRadius.circular(6),
-                                            ),
-                                            child: Center(
-                                              child: Text(
-                                                '${index + 1}',
-                                                style: const TextStyle(
-                                                  color: Colors.white,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: 16,
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          const SizedBox(width: 12),
-                                          Expanded(
-                                            child: Text(
-                                              poi.name,
-                                              style: const TextStyle(
-                                                color: Colors.white,
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w600,
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Row(
-                                        children: [
-                                          Container(
-                                            padding: const EdgeInsets.symmetric(
-                                              horizontal: 8,
-                                              vertical: 4,
-                                            ),
-                                            decoration: BoxDecoration(
-                                              color: Colors.white.withOpacity(0.2),
-                                              borderRadius: BorderRadius.circular(4),
-                                            ),
-                                            child: Text(
-                                              poi.category.toUpperCase(),
-                                              style: const TextStyle(
-                                                color: Colors.white70,
-                                                fontSize: 11,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                            ),
-                                          ),
-                                          const Spacer(),
-                                          const Icon(
-                                            Icons.location_on,
-                                            color: Colors.white70,
-                                            size: 16,
-                                          ),
-                                          const SizedBox(width: 4),
-                                          Text(
-                                            "${poi.distance.round()}m",
-                                            style: const TextStyle(
-                                              color: Colors.white70,
-                                              fontSize: 14,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                );
-                              },
-                            ),
-                    ),
-                  ],
+                  ),
                 ),
               ),
             ),
