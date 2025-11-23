@@ -77,20 +77,24 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _initialize() async {
     _log("Init", "Starting initialization sequence...");
     
+    // Debug: Print loaded keys (not values)
+    _log("Init", "Loaded env keys: ${dotenv.env.keys.toList()}");
+
     // Initialize Gemini service with API key
-    final geminiApiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
+    // Check for both common names just in case
+    final geminiApiKey = dotenv.env['GEMINI_API_KEY'] ?? dotenv.env['GEMINI_KEY'] ?? '';
     if (geminiApiKey.isEmpty) {
       setState(() => _statusText = "Error: Missing Gemini API key");
-      _log("Init", "Error: Missing Gemini API key");
+      _log("Init", "Error: Missing Gemini API key. Available keys: ${dotenv.env.keys}");
       return;
     }
     _geminiService = GeminiService(geminiApiKey);
     
     // Initialize Fish Audio service with API key
-    final fishApiKey = dotenv.env['FISH_AUDIO_KEY'] ?? '';
+    final fishApiKey = dotenv.env['FISH_AUDIO_KEY'] ?? dotenv.env['FISH_AUDIO_API_KEY'] ?? '';
     if (fishApiKey.isEmpty) {
       setState(() => _statusText = "Error: Missing Fish Audio API key");
-      _log("Init", "Error: Missing Fish Audio API key");
+      _log("Init", "Error: Missing Fish Audio API key. Available keys: ${dotenv.env.keys}");
       return;
     }
     _fishAudioService = FishAudioService(fishApiKey);
@@ -140,18 +144,25 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // Select back camera (rear-facing)
-    final backCamera = _cameras.firstWhere(
-      (camera) => camera.lensDirection == CameraLensDirection.back,
-      orElse: () => _cameras.first,
-    );
+    // User requested simpler logic: controller = CameraController(cameras[0], ResolutionPreset.high, enableAudio: false);
+    // We will try to find back camera, but fallback to index 0 immediately if needed.
     
-    _log("Camera", "Selected camera: ${backCamera.name} (${backCamera.lensDirection})");
+    CameraDescription selectedCamera;
+    try {
+      selectedCamera = _cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.back,
+      );
+      _log("Camera", "Found back camera: ${selectedCamera.name}");
+    } catch (e) {
+      _log("Camera", "Back camera not found, using first available camera");
+      selectedCamera = _cameras[0];
+    }
+    
+    _log("Camera", "Initializing controller for ${selectedCamera.name}...");
 
-    // Try initializing with medium resolution first for better compatibility
     controller = CameraController(
-      backCamera, 
-      ResolutionPreset.medium,
+      selectedCamera, 
+      ResolutionPreset.high,
       enableAudio: false,
     );
     
@@ -165,24 +176,7 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     } catch (e) {
-      _log("Camera", "Camera initialization error (medium): $e");
-      // Fallback to low resolution
-      try {
-        controller = CameraController(
-          backCamera, 
-          ResolutionPreset.low,
-          enableAudio: false,
-        );
-        await controller!.initialize();
-        _log("Camera", "Camera initialized successfully (low res)");
-        if (mounted) {
-          setState(() {
-            _isCameraActive = true;
-          });
-        }
-      } catch (e2) {
-         _log("Camera", "Camera initialization error (low): $e2");
-      }
+      _log("Camera", "Camera initialization error: $e");
     }
   }
 
