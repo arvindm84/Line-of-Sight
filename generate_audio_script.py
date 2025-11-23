@@ -2,7 +2,7 @@ from google import genai
 from PIL import Image
 
 def gemini_text():
-    GEMINI_API_KEY = 'APIKEY'
+    GEMINI_API_KEY = 'AIzaSyCc9aGSvySxbPGd2tHT0kem-CXqxISH3a0'
 
     sample_image_path = './media/frames/frame_0001.png'
 
