@@ -2,6 +2,7 @@ from google import genai
 from PIL import Image
 import os
 from dotenv import load_dotenv
+import fish
 
 def gemini_text():
 
@@ -29,7 +30,7 @@ def gemini_text():
     memorable summary of the current ambient feeling or setting (e.g., 'A lively outdoor 
     market,' 'The solemn geometry of office buildings'). Do NOT mention the weather, sky, or 
     any safety/navigational concerns.
-    
+
     If I have given you an image before and it is basically the same frame with very few changes 
     (like as if the user walked only a few steps ahead), then make a general comment, return 
     lesser text than usual and dont menton things you have mentioned before like how a 
@@ -44,4 +45,4 @@ def gemini_text():
         ]
     )
     
-    return response.text
+    fish.get_fish_audio(response=response)
