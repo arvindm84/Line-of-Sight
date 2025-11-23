@@ -82,6 +82,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // === TIMERS ===
   Timer? _visualTimer;      // Vision (Images)
+  Timer? _environmentTimer;
   int _visualCycleCount = 0;
 
   // === DIAGNOSTICS ===
@@ -135,38 +136,61 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!_isLoaded) return;
 
     if (_isActive) {
-      // STOP EVERYTHING
+      // === STOP ===
       setState(() {
         _isActive = false;
         _statusText = "System Idle";
         _yoloResults = [];
         _cameraImage = null;
         _globalDangerStatus = "SAFE";
+        _queuedEnvironmentText = null;
+        _lastDangerAudioTime = null;
       });
+
+      // 1. Cancel Timers
+      _environmentTimer?.cancel();
       _visualTimer?.cancel();
-      await controller?.stopImageStream();
+
+      // 2. Safe Camera Stop
+      if (controller != null && controller!.value.isStreamingImages) {
+        try {
+          await controller!.stopImageStream();
+        } catch (e) {
+          debugPrint("Camera Stop Error: $e");
+        }
+      }
+
+      // 3. Stop Audio
       await _fishAudioService.stopAudio();
+
+      // 4. Reset AI Memory
+      _tracker.reset();
+      _analyzer.reset();
+
     } else {
-      // START EVERYTHING
+      // === START ===
       setState(() {
         _isActive = true;
         _statusText = "Scanning...";
       });
 
-      // 1. Fast Loop (YOLO - Danger)
-      await controller?.startImageStream((image) => _yoloLoop(image));
+      // 1. Start Fast Loop (YOLO)
+      try {
+        await controller?.startImageStream((image) => _yoloLoop(image));
+      } catch (e) {
+        debugPrint("Camera Start Error: $e");
+      }
 
-      // 2. Unified Loop (Visual every 15s, Map every 4th time)
-      // Trigger first scan immediately
-      _visualCycleCount = 0;
-      _runUnifiedSchedule();
-      
-      _visualTimer = Timer.periodic(const Duration(seconds: 15), (t) async {
-        if (!_isActive) {
-          t.cancel();
-          return;
+      // 2. Start Map Loop (Every 30s)
+      _environmentTimer = Timer.periodic(const Duration(seconds: 30), (t) => _mapsLoop());
+
+      // 3. Start Visual Loop (Every 15s)
+      // We delay it by 2 seconds so it doesn't fight with the Map loop immediately
+      Future.delayed(const Duration(seconds: 2), () {
+        if (_isActive) {
+          _visualLoop(); // Run once immediately
+          _visualTimer = Timer.periodic(const Duration(seconds: 15), (t) => _visualLoop());
         }
-        await _runUnifiedSchedule();
       });
     }
   }
@@ -177,16 +201,18 @@ class _HomeScreenState extends State<HomeScreen> {
     
     // 2. Increment & Check for Map Description
     _visualCycleCount++;
-    if (_visualCycleCount >= 4) {
+    if (_visualCycleCount >= 2) {
       _visualCycleCount = 0;
-      debugPrint("🔄 Cycle 4 reached (45s): Triggering Map Description...");
+      debugPrint("Cycle 2 reached (40s): Triggering Map Description...");
       await _mapsLoop();
     }
   }
 
-  // === LOOP 1: FAST DANGER DETECTION (YOLO) ===
+// === LOOP 1: FAST DANGER DETECTION (YOLO) ===
   void _yoloLoop(CameraImage image) async {
+    // Safety check: If stopped, drop frame immediately
     if (_isDetecting || !_isActive) return;
+
     _isDetecting = true;
     final stopwatch = Stopwatch()..start();
 
@@ -199,6 +225,10 @@ class _HomeScreenState extends State<HomeScreen> {
         confThreshold: 0.35,
         classThreshold: 0.4,
       );
+
+      // ... (Rest of your YOLO logic stays the same) ...
+      // Copy the logic from your previous code for tracking/analyzing
+      // I am truncating here for brevity, but keep your existing logic!
 
       List<Rect> rects = result.map((r) => Rect.fromLTRB(r["box"][0], r["box"][1], r["box"][2], r["box"][3])).toList();
       Map<int, int> assignments = _tracker.update(rects);
@@ -221,9 +251,8 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      // --- AUDIO PRIORITY LOGIC ---
       if (maxDanger == "CRITICAL") {
-        if (_lastDangerAudioTime == null || DateTime.now().difference(_lastDangerAudioTime!).inSeconds > 3) {
+        if (_lastDangerAudioTime == null || DateTime.now().difference(_lastDangerAudioTime!).inSeconds > 3 && dangerLabel != "person") {
           _lastDangerAudioTime = DateTime.now();
           debugPrint("🚨 DANGER INTERRUPT: $dangerLabel");
           _fishAudioService.textToSpeech("Stop! $dangerLabel ahead!", interrupt: true);
@@ -237,7 +266,6 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
       _lastDangerStatus = maxDanger;
-      // ----------------------------
 
       stopwatch.stop();
       if (mounted) {
@@ -261,27 +289,47 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // === VISUAL LOOP (Medium Priority) ===
+// === VISUAL LOOP (Medium Priority) ===
   Future<void> _visualLoop() async {
     if (!_isActive || controller == null || !controller!.value.isInitialized) return;
 
-    // If Danger is active, don't even queue visuals. Focus on safety.
+    // If Danger is active, don't even queue visuals.
     if (_globalDangerStatus == "CRITICAL") return;
 
     try {
-      await controller?.stopImageStream();
+      // 1. Stop Stream to take Pic
+      if (controller!.value.isStreamingImages) {
+        await controller?.stopImageStream();
+      }
+
+      // 2. Take Pic
       XFile imageFile = await controller!.takePicture();
+
+      // 3. CRITICAL CHECK: Did user press STOP while we were taking the pic?
+      if (!_isActive) {
+        File(imageFile.path).delete(); // Clean up
+        return; // EXIT IMMEDIATELY. DO NOT RESTART STREAM.
+      }
+
+      // 4. Restart Stream
       await controller?.startImageStream((image) => _yoloLoop(image));
 
+      // 5. Process Image
       String desc = await _geminiService.describeEnvironmentFromImage(imageFile);
       File(imageFile.path).delete();
 
-      // Add to Queue (interrupt: false)
+      // 6. Speak
       debugPrint("📸 Queuing Visual Description...");
       _fishAudioService.textToSpeech(desc, interrupt: false);
 
     } catch (e) {
       debugPrint("Visual Error: $e");
+      // Attempt to recover stream if we are still active
+      if (_isActive && controller != null && !controller!.value.isStreamingImages) {
+        try {
+          await controller?.startImageStream((image) => _yoloLoop(image));
+        } catch (err) { /* Ignore */ }
+      }
     }
   }
 
@@ -412,7 +460,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
 
           Positioned(
-            bottom: 110, left: 20,
+            bottom: 170, left: 20,
             child: _isActive ? Text(
               "FPS: $_fps | Inf: ${_inferenceMs}ms",
               style: const TextStyle(color: Colors.white70, fontSize: 12),
@@ -456,6 +504,9 @@ class DangerAnalyzer {
 
     if (["laptop", "tv", "cell phone"].contains(label)) return {"status": "INFO", "message": "Detected"};
     return {"status": "SAFE", "message": ""};
+  }
+  void reset() {
+    _history.clear();
   }
   void cleanOldHistory(Set<int> activeIds) => _history.removeWhere((key, value) => !activeIds.contains(key));
 }
@@ -506,6 +557,11 @@ class StickyTracker {
     _objects.keys.where((id) => !usedIds.contains(id)).forEach((id) => _disappearedCount[id] = (_disappearedCount[id] ?? 0) + 1);
     _cleanup();
     return assignments;
+  }
+  void reset() {
+    _nextId = 0;
+    _objects.clear();
+    _disappearedCount.clear();
   }
   void _cleanup() {
     _objects.removeWhere((id, _) => (_disappearedCount[id] ?? 0) > 10);
