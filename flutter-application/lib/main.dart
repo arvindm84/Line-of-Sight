@@ -3,12 +3,18 @@ import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'osm_service.dart';
+import 'gemini_service.dart';
 
 late List<CameraDescription> _cameras;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  
+  // Load environment variables
+  await dotenv.load(fileName: ".env");
+  
   try {
     _cameras = await availableCameras();
   } catch (e) {
@@ -42,10 +48,12 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   CameraController? controller;
   final OSMService _osmService = OSMService();
+  late final GeminiService _geminiService;
 
   // State variables
   String _statusText = "Initializing...";
   List<POI> _nearbyPOIs = [];
+  String _conversationalDescription = "";
   bool _isScanning = false;
   bool _isCameraActive = false; // Controls camera display
   Timer? _scanTimer;
@@ -58,6 +66,14 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _initialize() async {
+    // Initialize Gemini service with API key
+    final apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
+    if (apiKey.isEmpty) {
+      setState(() => _statusText = "Error: Missing API key");
+      return;
+    }
+    _geminiService = GeminiService(apiKey);
+    
     await _requestPermissions();
     await _initCamera();
     await _startLocationTracking();
@@ -111,20 +127,30 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!mounted || _currentPosition == null) return;
 
     try {
-      // Fetch POIs based on current location (continues in background)
+      // Step 1: Fetch POIs from OpenStreetMap
       final results = await _osmService.getNearbyPOIs(
           _currentPosition!.latitude,
           _currentPosition!.longitude
       );
 
+      final top5 = results.take(5).toList();
+
+      // Step 2: Convert to conversational text using Gemini
+      final conversationalText = await _geminiService.convertToConversation(top5);
+
       if (mounted) {
         setState(() {
-          // Limit to top 5 locations
-          _nearbyPOIs = results.take(5).toList();
+          _nearbyPOIs = top5;
+          _conversationalDescription = conversationalText;
         });
       }
     } catch (e) {
       print("Scan error: $e");
+      if (mounted) {
+        setState(() {
+          _conversationalDescription = "Unable to get location description.";
+        });
+      }
     }
   }
 
@@ -202,11 +228,12 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             
-            // BOTTOM SECTION: Start/Stop Button
+            // BOTTOM SECTION: Conversational Description and Start/Stop Button
             Expanded(
               flex: 1,
               child: Container(
                 width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
                     begin: Alignment.topLeft,
@@ -217,8 +244,37 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 ),
-                child: Center(
-                  child: ElevatedButton(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Conversational description text
+                    if (_conversationalDescription.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withOpacity(0.3),
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(
+                              color: const Color(0xFF667eea).withOpacity(0.3),
+                              width: 1,
+                            ),
+                          ),
+                          child: Text(
+                            _conversationalDescription,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              height: 1.5,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                        ),
+                      ),
+                    
+                    // Start/Stop Button
+                    ElevatedButton(
                     onPressed: _toggleCamera,
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(horizontal: 60, vertical: 20),
@@ -280,7 +336,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     ),
-                  ),
+                  ],
                 ),
               ),
             ),
