@@ -2,7 +2,7 @@ from google import genai
 from PIL import Image
 import os
 from dotenv import load_dotenv
-import fish
+import fish as fs
 
 def gemini_text():
 
@@ -44,5 +44,5 @@ def gemini_text():
             prompt
         ]
     )
-    
-    fish.get_fish_audio(response=response)
+
+    fs.get_fish_audio(response.text)

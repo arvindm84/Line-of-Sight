@@ -1,6 +1,5 @@
 from fishaudio import FishAudio
 from fishaudio.utils import save
-import generate_audio_script
 import os
 from dotenv import load_dotenv
 
@@ -23,7 +22,7 @@ def get_fish_audio(response):
 
     # Stream directly to file (memory efficient for large audio)
     audio_stream = client.tts.stream(text=response)
-    with open("audio/output.mp3", "wb") as f:
+    with open("./media/output.mp3", "wb") as f:
         for chunk in audio_stream:
             f.write(chunk)  # Write each chunk as it arrives
 
