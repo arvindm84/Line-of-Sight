@@ -18,10 +18,17 @@ Future<void> main() async {
   
   try {
     _cameras = await availableCameras();
+    _log("Main", "Available cameras: ${_cameras.length}");
   } catch (e) {
+    _log("Main", "Error getting cameras: $e");
     _cameras = [];
   }
   runApp(const VisualGuideApp());
+}
+
+void _log(String category, String message) {
+  final timestamp = DateTime.now().toIso8601String();
+  print("[$timestamp] [$category] $message");
 }
 
 class VisualGuideApp extends StatelessWidget {
@@ -68,10 +75,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _initialize() async {
+    _log("Init", "Starting initialization sequence...");
+    
     // Initialize Gemini service with API key
     final geminiApiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
     if (geminiApiKey.isEmpty) {
       setState(() => _statusText = "Error: Missing Gemini API key");
+      _log("Init", "Error: Missing Gemini API key");
       return;
     }
     _geminiService = GeminiService(geminiApiKey);
@@ -80,6 +90,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final fishApiKey = dotenv.env['FISH_AUDIO_KEY'] ?? '';
     if (fishApiKey.isEmpty) {
       setState(() => _statusText = "Error: Missing Fish Audio API key");
+      _log("Init", "Error: Missing Fish Audio API key");
       return;
     }
     _fishAudioService = FishAudioService(fishApiKey);
@@ -90,7 +101,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
     setState(() {
       _isScanning = true;
-      _isCameraActive = true;
       _statusText = "Ready";
     });
 
@@ -111,15 +121,22 @@ class _HomeScreenState extends State<HomeScreen> {
     Future.delayed(const Duration(seconds: 2), () {
       _processWithGeminiAndAudio();
     });
+    
+    _log("Init", "Initialization complete.");
   }
 
   Future<void> _requestPermissions() async {
-    await [Permission.camera, Permission.location].request();
+    _log("Perms", "Requesting permissions...");
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.camera,
+      Permission.location,
+    ].request();
+    _log("Perms", "Camera: ${statuses[Permission.camera]}, Location: ${statuses[Permission.location]}");
   }
 
   Future<void> _initCamera() async {
     if (_cameras.isEmpty) {
-      print("No cameras available");
+      _log("Camera", "No cameras available");
       return;
     }
 
@@ -129,26 +146,53 @@ class _HomeScreenState extends State<HomeScreen> {
       orElse: () => _cameras.first,
     );
     
+    _log("Camera", "Selected camera: ${backCamera.name} (${backCamera.lensDirection})");
+
+    // Try initializing with medium resolution first for better compatibility
     controller = CameraController(
       backCamera, 
-      ResolutionPreset.high,
+      ResolutionPreset.medium,
       enableAudio: false,
     );
     
     try {
       await controller!.initialize();
-      print("Camera initialized successfully");
-      if (mounted) setState(() {});
+      _log("Camera", "Camera initialized successfully");
+      
+      if (mounted) {
+        setState(() {
+          _isCameraActive = true;
+        });
+      }
     } catch (e) {
-      print("Camera initialization error: $e");
+      _log("Camera", "Camera initialization error (medium): $e");
+      // Fallback to low resolution
+      try {
+        controller = CameraController(
+          backCamera, 
+          ResolutionPreset.low,
+          enableAudio: false,
+        );
+        await controller!.initialize();
+        _log("Camera", "Camera initialized successfully (low res)");
+        if (mounted) {
+          setState(() {
+            _isCameraActive = true;
+          });
+        }
+      } catch (e2) {
+         _log("Camera", "Camera initialization error (low): $e2");
+      }
     }
   }
 
   Future<void> _startLocationTracking() async {
+    _log("Location", "Starting location tracking...");
+    
     // Check if location services are enabled
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
-      print("Location services are disabled");
+      _log("Location", "Location services are disabled");
       setState(() => _statusText = "Location services disabled. Please enable location.");
       return;
     }
@@ -158,72 +202,71 @@ class _HomeScreenState extends State<HomeScreen> {
     if (permission == LocationPermission.denied) {
       permission = await Geolocator.requestPermission();
       if (permission == LocationPermission.denied) {
-        print("Location permission denied");
+        _log("Location", "Location permission denied");
         setState(() => _statusText = "Location permission denied");
         return;
       }
     }
 
     if (permission == LocationPermission.deniedForever) {
-      print("Location permission denied forever");
+      _log("Location", "Location permission denied forever");
       setState(() => _statusText = "Location permission permanently denied");
       return;
     }
 
-    // Get initial position
+    // Get initial position with timeout
     try {
+      _log("Location", "Getting initial position...");
       _currentPosition = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
+        timeLimit: const Duration(seconds: 5),
       );
-      print("Initial position: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}");
+      _log("Location", "Initial position: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}");
     } catch (e) {
-      print("Error getting initial position: $e");
+      _log("Location", "Error getting initial position: $e");
     }
 
     // Listen to location stream
+    // Removed distanceFilter to ensure we get updates even for small movements during testing
     Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
             accuracy: LocationAccuracy.high,
-            distanceFilter: 10
+            // distanceFilter: 10 // Commented out for debugging
         )
     ).listen((Position position) {
       _currentPosition = position;
-      print("Position update: ${position.latitude}, ${position.longitude}");
+      _log("Location", "Position update: ${position.latitude}, ${position.longitude}");
+    }, onError: (e) {
+      _log("Location", "Stream error: $e");
     });
   }
 
   /// Fetch POIs from OpenStreetMap (called every 5 seconds)
   Future<void> _fetchPOIs() async {
-    if (!mounted) {
-      print("fetchPOIs: Widget not mounted");
-      return;
-    }
+    if (!mounted) return;
     
     if (_currentPosition == null) {
-      print("fetchPOIs: No location available yet");
+      _log("OSM", "No location available yet, skipping POI fetch");
       return;
     }
 
-    print("=== Fetching POIs from OSM (5s cycle) ===");
-    print("Current location: ${_currentPosition!.latitude}, ${_currentPosition!.longitude}");
+    _log("OSM", "Fetching POIs for ${_currentPosition!.latitude}, ${_currentPosition!.longitude}");
 
     try {
-      // Step 1: Fetch POIs from OpenStreetMap
-      print("Fetching POIs from OpenStreetMap...");
       final results = await _osmService.getNearbyPOIs(
           _currentPosition!.latitude,
           _currentPosition!.longitude
       );
-      print("Found ${results.length} POIs from OSM");
+      _log("OSM", "Found ${results.length} POIs");
 
       final top5 = results.take(5).toList();
       
       if (top5.isEmpty) {
-        print("No POIs found nearby");
+        _log("OSM", "No POIs found nearby");
         return;
       }
       
-      print("Top 5 POIs: ${top5.map((p) => p.name).toList()}");
+      _log("OSM", "Top 5: ${top5.map((p) => p.name).toList()}");
 
       // Update state with the latest POIs
       if (mounted) {
@@ -231,49 +274,50 @@ class _HomeScreenState extends State<HomeScreen> {
           _nearbyPOIs = top5;
         });
       }
-      
-      print("=== OSM fetch complete ===");
     } catch (e) {
-      print("OSM fetch error: $e");
+      _log("OSM", "Fetch error: $e");
     }
   }
 
   /// Process POIs with Gemini and Fish Audio (called every 60 seconds)
   Future<void> _processWithGeminiAndAudio() async {
-    if (!mounted) {
-      print("processWithGeminiAndAudio: Widget not mounted");
-      return;
-    }
+    if (!mounted) return;
 
     if (_nearbyPOIs.isEmpty) {
-      print("processWithGeminiAndAudio: No POIs available to process");
+      _log("Pipeline", "No POIs available to process");
       return;
     }
 
-    print("=== Starting Gemini + Fish Audio pipeline (60s cycle) ===");
-    print("Processing ${_nearbyPOIs.length} POIs: ${_nearbyPOIs.map((p) => p.name).toList()}");
+    _log("Pipeline", "Starting Gemini + Fish Audio pipeline...");
+    _log("Pipeline", "Processing ${_nearbyPOIs.length} POIs");
 
     try {
       // Step 2: Convert to conversational text using Gemini
-      print("Step 1: Sending to Gemini API for conversational text...");
+      _log("Pipeline", "Sending to Gemini...");
       final conversationalText = await _geminiService.convertToConversation(_nearbyPOIs);
-      print("Gemini response: $conversationalText");
+      _log("Pipeline", "Gemini response: $conversationalText");
 
       // Step 3: Convert text to speech using Fish Audio
-      print("Step 2: Sending to Fish Audio API for TTS...");
+      _log("Pipeline", "Sending to Fish Audio...");
       await _fishAudioService.textToSpeech(conversationalText);
-      print("Fish Audio TTS complete");
+      _log("Pipeline", "Fish Audio TTS complete");
       
-      print("=== Gemini + Fish Audio pipeline complete ===");
+      _log("Pipeline", "Pipeline complete");
     } catch (e) {
-      print("Gemini/Audio processing error: $e");
+      _log("Pipeline", "Error: $e");
     }
   }
 
   void _toggleCamera() {
+    if (controller == null || !controller!.value.isInitialized) {
+      _log("Camera", "Cannot toggle: Controller not initialized");
+      return;
+    }
+    
     setState(() {
       _isCameraActive = !_isCameraActive;
     });
+    _log("Camera", "Toggled camera: $_isCameraActive");
   }
 
   @override
@@ -326,6 +370,14 @@ class _HomeScreenState extends State<HomeScreen> {
                                 fontSize: 16,
                               ),
                             ),
+                            if (_statusText.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 8.0),
+                                child: Text(
+                                  _statusText,
+                                  style: TextStyle(color: Colors.redAccent, fontSize: 12),
+                                ),
+                              ),
                           ],
                         ),
                       ),
