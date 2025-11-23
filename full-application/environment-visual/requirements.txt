@@ -1,0 +1,5 @@
+# Fish Audio and Gemini API dependencies for environment-visual
+fishaudio
+python-dotenv
+google-genai
+Pillow
