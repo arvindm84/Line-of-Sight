@@ -66,7 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _statusText = "Scanning active";
     });
 
-    // Start periodic scan (every 5 seconds, same as main.js)
+    // Start periodic scan (every 5 seconds)
     _scanTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       _performScan();
     });
@@ -89,7 +89,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startLocationTracking() async {
-    // Porting LocationService logic
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       setState(() => _statusText = "Location services disabled");
@@ -119,7 +118,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (mounted) {
         setState(() {
-          _nearbyPOIs = results;
+          // Limit to top 5 locations
+          _nearbyPOIs = results.take(5).toList();
         });
       }
     } catch (e) {
@@ -137,84 +137,243 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Stack(
-        children: [
-          // 1. Camera Layer
-          if (controller != null && controller!.value.isInitialized)
-            SizedBox.expand(
-              child: CameraPreview(controller!),
-            )
-          else
-            const Center(child: CircularProgressIndicator()),
-
-          // 2. Status Overlay (Top)
-          Positioned(
-            top: 50,
-            left: 20,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.7),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                _statusText,
-                style: const TextStyle(color: Colors.white),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // TOP SECTION: Location Information
+            Expanded(
+              flex: 3,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      const Color(0xFF1A1A1A),
+                      const Color(0xFF2A2A2A),
+                    ],
+                  ),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Status indicator
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                      decoration: BoxDecoration(
+                        color: Colors.black.withOpacity(0.7),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: _isScanning ? Colors.green : Colors.red,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _statusText,
+                            style: const TextStyle(color: Colors.white, fontSize: 14),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    
+                    // Nearby Locations Title
+                    const Text(
+                      "Top 5 Nearby Locations",
+                      style: TextStyle(
+                        color: Color(0xFF667eea),
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    
+                    // Location List
+                    Expanded(
+                      child: _nearbyPOIs.isEmpty
+                          ? Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  CircularProgressIndicator(
+                                    color: Color(0xFF667eea),
+                                  ),
+                                  const SizedBox(height: 16),
+                                  const Text(
+                                    "Searching for nearby locations...",
+                                    style: TextStyle(color: Colors.grey, fontSize: 16),
+                                  ),
+                                ],
+                              ),
+                            )
+                          : ListView.builder(
+                              itemCount: _nearbyPOIs.length,
+                              itemBuilder: (context, index) {
+                                final poi = _nearbyPOIs[index];
+                                return Container(
+                                  margin: const EdgeInsets.only(bottom: 12),
+                                  padding: const EdgeInsets.all(16),
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: [
+                                        const Color(0xFF667eea).withOpacity(0.3),
+                                        const Color(0xFF764ba2).withOpacity(0.3),
+                                      ],
+                                    ),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: const Color(0xFF667eea).withOpacity(0.5),
+                                      width: 1,
+                                    ),
+                                  ),
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Container(
+                                            width: 32,
+                                            height: 32,
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF667eea),
+                                              borderRadius: BorderRadius.circular(6),
+                                            ),
+                                            child: Center(
+                                              child: Text(
+                                                '${index + 1}',
+                                                style: const TextStyle(
+                                                  color: Colors.white,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: 16,
+                                                ),
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            child: Text(
+                                              poi.name,
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 16,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 8,
+                                              vertical: 4,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: Colors.white.withOpacity(0.2),
+                                              borderRadius: BorderRadius.circular(4),
+                                            ),
+                                            child: Text(
+                                              poi.category.toUpperCase(),
+                                              style: const TextStyle(
+                                                color: Colors.white70,
+                                                fontSize: 11,
+                                                fontWeight: FontWeight.w500,
+                                              ),
+                                            ),
+                                          ),
+                                          const Spacer(),
+                                          const Icon(
+                                            Icons.location_on,
+                                            color: Colors.white70,
+                                            size: 16,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            "${poi.distance.round()}m",
+                                            style: const TextStyle(
+                                              color: Colors.white70,
+                                              fontSize: 14,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-
-          // 3. Output Panel (Right/Bottom - Replicating style.css #output-panel)
-          Positioned(
-            top: 120,
-            right: 20,
-            bottom: 100,
-            width: 300,
-            child: Container(
-              padding: const EdgeInsets.all(20),
+            
+            // Divider
+            Container(
+              height: 2,
               decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.85),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    "Nearby Locations",
-                    style: TextStyle(
-                      color: Color(0xFF667eea),
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  Expanded(
-                    child: _nearbyPOIs.isEmpty
-                        ? const Text("Searching...", style: TextStyle(color: Colors.grey))
-                        : ListView.builder(
-                      itemCount: _nearbyPOIs.length,
-                      itemBuilder: (context, index) {
-                        final poi = _nearbyPOIs[index];
-                        return Container(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          padding: const EdgeInsets.all(8),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF667eea).withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            "${poi.name} (${poi.category}) - ${poi.distance.round()}m",
-                            style: const TextStyle(color: Colors.white, fontSize: 13),
-                          ),
-                        );
-                      },
-                    ),
-                  ),
-                ],
+                gradient: LinearGradient(
+                  colors: [
+                    const Color(0xFF667eea),
+                    const Color(0xFF764ba2),
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+            
+            // BOTTOM SECTION: Camera Feed with 20:9 aspect ratio
+            Expanded(
+              flex: 2,
+              child: Container(
+                color: Colors.black,
+                child: Center(
+                  child: AspectRatio(
+                    aspectRatio: 20 / 9, // 20:9 aspect ratio to prevent stretching
+                    child: controller != null && controller!.value.isInitialized
+                        ? ClipRect(
+                            child: FittedBox(
+                              fit: BoxFit.cover,
+                              child: SizedBox(
+                                width: controller!.value.previewSize!.height,
+                                height: controller!.value.previewSize!.width,
+                                child: CameraPreview(controller!),
+                              ),
+                            ),
+                          )
+                        : Container(
+                            color: Colors.black,
+                            child: const Center(
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  CircularProgressIndicator(color: Colors.white),
+                                  SizedBox(height: 16),
+                                  Text(
+                                    'Initializing camera...',
+                                    style: TextStyle(color: Colors.white70),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
