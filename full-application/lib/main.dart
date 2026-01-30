@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:flutter_vision/flutter_vision.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_volume_controller/flutter_volume_controller.dart';
+import 'package:sensors_plus/sensors_plus.dart';
 
 import 'osm_service.dart';
 import 'gemini_service.dart';
@@ -38,6 +41,7 @@ class VisualGuideApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark().copyWith(
         scaffoldBackgroundColor: const Color(0xFF1A1A1A),
+        primaryColor: Colors.yellowAccent,
       ),
       home: const HomeScreen(),
     );
@@ -56,6 +60,11 @@ class _HomeScreenState extends State<HomeScreen> {
   CameraController? controller;
   late FlutterVision vision;
 
+  // === LISTENERS ===
+  StreamSubscription? _accelerometerSubscription;
+  StreamSubscription? _volumeSubscription;
+  DateTime? _lastShakeTime;
+
   // === SERVICES ===
   final OSMService _osmService = OSMService();
   late GeminiService _geminiService;
@@ -65,25 +74,24 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // === STATE ===
   bool _isLoaded = false;
-  bool _isActive = false;
+  bool _isActive = false; // "Start/Stop" switch
   bool _isDetecting = false;
   String _statusText = "Initializing...";
+
+  // === BUTTON FEEDBACK STATE ===
+  String _buttonFeedback = "";
+  Timer? _feedbackClearTimer;
 
   // === DATA ===
   List<Map<String, dynamic>> _yoloResults = [];
   Map<int, int> _trackAssignments = {};
   CameraImage? _cameraImage;
   String _globalDangerStatus = "SAFE";
-  String _lastDangerStatus = "SAFE";
-
-  // === AUDIO QUEUE SYSTEM ===
-  String? _queuedEnvironmentText;
-  DateTime? _lastDangerAudioTime;
+  File? _lastGeminiImage;
 
   // === TIMERS ===
-  Timer? _visualTimer;      // Vision (Images)
-  Timer? _environmentTimer;
-  int _visualCycleCount = 0;
+  Timer? _volumeDoublePressTimer;
+  DateTime? _lastDangerAudioTime;
 
   // === DIAGNOSTICS ===
   int _fps = 0;
@@ -97,8 +105,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _initializeSystem() async {
-    final gKey = dotenv.env['GEMINI_API_KEY'] ?? dotenv.env['GEMINI_KEY'] ?? '';
-    final fKey = dotenv.env['FISH_AUDIO_KEY'] ?? dotenv.env['FISH_AUDIO_API_KEY'] ?? '';
+    final gKey = "AIzaSyCic1UHAphNgeKC9feOkkM1BRycK_Mw3b0";
+    final fKey = "b34f820bdc61448e96e1235f94fa60d0";
 
     if (gKey.isEmpty || fKey.isEmpty) {
       setState(() => _statusText = "Error: Missing API Keys");
@@ -113,6 +121,8 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => _statusText = "No Camera Found");
       return;
     }
+
+    // Use High Resolution for good Gemini photos
     controller = CameraController(_cameras[0], ResolutionPreset.high, enableAudio: false);
     await controller!.initialize();
 
@@ -126,93 +136,191 @@ class _HomeScreenState extends State<HomeScreen> {
         useGpu: true
     );
 
+    _setupVolumeTrigger();
+    _setupShakeTrigger();
+
     setState(() {
       _isLoaded = true;
-      _statusText = "System Ready. Press Start.";
+      _statusText = "Ready. Press Start.";
     });
   }
+
+  // === 1. VOLUME BUTTON LOGIC ===
+  void _setupVolumeTrigger() {
+    try {
+      _volumeSubscription = FlutterVolumeController.addListener((volume) {
+        // Only trigger actions if system is ACTIVE
+        if (_isActive) {
+          _onVolumePress();
+        } else {
+          // If system is OFF, volume buttons just act as a Start Switch
+          _toggleSystem();
+        }
+      });
+    } catch (e) {
+      debugPrint("Volume Init Error: $e");
+    }
+  }
+
+  void _onVolumePress() {
+    _showButtonFeedback("Button Detected...", Colors.grey);
+
+    if (_volumeDoublePressTimer != null && _volumeDoublePressTimer!.isActive) {
+      _volumeDoublePressTimer?.cancel();
+      _onDoublePressLocation();
+    } else {
+      _volumeDoublePressTimer = Timer(const Duration(milliseconds: 400), () {
+        _onSinglePressVision();
+      });
+    }
+  }
+
+  void _showButtonFeedback(String text, Color color) {
+    setState(() => _buttonFeedback = text);
+    _feedbackClearTimer?.cancel();
+    _feedbackClearTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _buttonFeedback = "");
+    });
+  }
+
+  // === 2. SHAKE LOGIC ===
+  void _setupShakeTrigger() {
+    _accelerometerSubscription = userAccelerometerEvents.listen((UserAccelerometerEvent event) {
+      double force = math.sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
+      if (force > 12.0) {
+        DateTime now = DateTime.now();
+        if (_lastShakeTime == null || now.difference(_lastShakeTime!) > const Duration(seconds: 2)) {
+          _lastShakeTime = now;
+          _showButtonFeedback("📳 SHAKE DETECTED", Colors.yellow);
+          _toggleSystem();
+          if (_isActive) _fishAudioService.textToSpeech("System Started", interrupt: true);
+          else _fishAudioService.textToSpeech("System Stopped", interrupt: true);
+        }
+      }
+    });
+  }
+
+  // === 3. CORE ACTIONS (BUTTON ONLY) ===
+
+  Future<void> _onSinglePressVision() async {
+    // STRICT CHECK: Must be Active to run
+    if (!_isActive) return;
+
+    _showButtonFeedback("📸 SINGLE CLICK: Vision", Colors.cyan);
+    debugPrint("📸 Vision Scan Triggered");
+
+    if (controller == null || !controller!.value.isInitialized) return;
+
+    _fishAudioService.textToSpeech("Capturing...", interrupt: true);
+
+    try {
+      // 1. Pause Stream
+      bool wasStreaming = controller!.value.isStreamingImages;
+      if (wasStreaming) await controller!.stopImageStream();
+
+      // 2. Capture
+      XFile image = await controller!.takePicture();
+
+      setState(() {
+        if (_lastGeminiImage != null) _lastGeminiImage!.delete();
+        _lastGeminiImage = File(image.path);
+      });
+
+      // 3. Resume Stream Immediately
+      if (wasStreaming && _isActive) {
+        await controller!.startImageStream((image) => _yoloLoop(image));
+      }
+
+      // 4. Analyze (Gemini)
+      String desc = await _geminiService.describeEnvironmentFromImage(image);
+
+      // 5. Speak (STRICT CHECK: Am I still active?)
+      if (mounted && _isActive) {
+        _fishAudioService.textToSpeech(desc, interrupt: false);
+      } else {
+        debugPrint("🛑 Stop pressed during Gemini. Speech Cancelled.");
+      }
+
+    } catch (e) {
+      debugPrint("Vision Error: $e");
+      _showButtonFeedback("Error: $e", Colors.red);
+    }
+  }
+
+  Future<void> _onDoublePressLocation() async {
+    if (!_isActive) return;
+
+    _showButtonFeedback("📍 DOUBLE CLICK: Location", Colors.green);
+    _fishAudioService.textToSpeech("Checking location...", interrupt: true);
+
+    try {
+      Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
+      List<POI> pois = await _osmService.getNearbyPOIs(pos.latitude, pos.longitude);
+
+      // STRICT CHECK
+      if (!_isActive) return;
+
+      if (pois.isNotEmpty) {
+        String desc = await _geminiService.convertToConversation(pois.take(3).toList());
+        _fishAudioService.textToSpeech("Nearby: $desc", interrupt: false);
+      } else {
+        _fishAudioService.textToSpeech("No known landmarks nearby.");
+      }
+    } catch (e) {
+      _fishAudioService.textToSpeech("Could not get location.");
+    }
+  }
+
+  // === 4. SYSTEM CONTROL ===
 
   void _toggleSystem() async {
     if (!_isLoaded) return;
 
     if (_isActive) {
-      // === STOP ===
+      // === STOP COMMAND ===
+      debugPrint("🛑 SYSTEM STOPPING...");
+
+      // 1. Kill Audio
+      await _fishAudioService.stopAudio();
+
+      // 2. Update State
       setState(() {
         _isActive = false;
         _statusText = "System Idle";
         _yoloResults = [];
-        _cameraImage = null;
         _globalDangerStatus = "SAFE";
-        _queuedEnvironmentText = null;
-        _lastDangerAudioTime = null;
+        _buttonFeedback = "🛑 STOPPED";
       });
 
-      // 1. Cancel Timers
-      _environmentTimer?.cancel();
-      _visualTimer?.cancel();
-
-      // 2. Safe Camera Stop
-      if (controller != null && controller!.value.isStreamingImages) {
-        try {
-          await controller!.stopImageStream();
-        } catch (e) {
-          debugPrint("Camera Stop Error: $e");
-        }
+      // 3. Stop Camera Stream
+      if (controller!.value.isStreamingImages) {
+        await controller!.stopImageStream();
       }
 
-      // 3. Stop Audio
-      await _fishAudioService.stopAudio();
-
-      // 4. Reset AI Memory
+      // 4. Reset Trackers
       _tracker.reset();
       _analyzer.reset();
 
     } else {
-      // === START ===
+      // === START COMMAND ===
+      debugPrint("▶️ SYSTEM STARTING...");
       setState(() {
         _isActive = true;
         _statusText = "Scanning...";
+        _buttonFeedback = "▶️ STARTED";
       });
 
-      // 1. Start Fast Loop (YOLO)
       try {
         await controller?.startImageStream((image) => _yoloLoop(image));
+        // NOTE: No timers here anymore. Only YOLO runs automatically.
       } catch (e) {
         debugPrint("Camera Start Error: $e");
       }
-
-      // 2. Start Map Loop (Every 30s)
-      _environmentTimer = Timer.periodic(const Duration(seconds: 30), (t) => _mapsLoop());
-
-      // 3. Start Visual Loop (Every 15s)
-      // We delay it by 2 seconds so it doesn't fight with the Map loop immediately
-      Future.delayed(const Duration(seconds: 2), () {
-        if (_isActive) {
-          _visualLoop(); // Run once immediately
-          _visualTimer = Timer.periodic(const Duration(seconds: 15), (t) => _visualLoop());
-        }
-      });
     }
   }
 
-  Future<void> _runUnifiedSchedule() async {
-    // 1. Run Visual Description
-    await _visualLoop();
-    
-    // 2. Increment & Check for Map Description
-    _visualCycleCount++;
-    if (_visualCycleCount >= 2) {
-      _visualCycleCount = 0;
-      debugPrint("Cycle 2 reached (40s): Triggering Map Description...");
-      await _mapsLoop();
-    }
-  }
-
-// === LOOP 1: FAST DANGER DETECTION (YOLO) ===
   void _yoloLoop(CameraImage image) async {
-    // Safety check: If stopped, drop frame immediately
     if (_isDetecting || !_isActive) return;
-
     _isDetecting = true;
     final stopwatch = Stopwatch()..start();
 
@@ -225,10 +333,6 @@ class _HomeScreenState extends State<HomeScreen> {
         confThreshold: 0.35,
         classThreshold: 0.4,
       );
-
-      // ... (Rest of your YOLO logic stays the same) ...
-      // Copy the logic from your previous code for tracking/analyzing
-      // I am truncating here for brevity, but keep your existing logic!
 
       List<Rect> rects = result.map((r) => Rect.fromLTRB(r["box"][0], r["box"][1], r["box"][2], r["box"][3])).toList();
       Map<int, int> assignments = _tracker.update(rects);
@@ -251,21 +355,15 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       }
 
-      if (maxDanger == "CRITICAL") {
-        if (_lastDangerAudioTime == null || DateTime.now().difference(_lastDangerAudioTime!).inSeconds > 3 && dangerLabel != "person") {
-          _lastDangerAudioTime = DateTime.now();
-          debugPrint("🚨 DANGER INTERRUPT: $dangerLabel");
-          _fishAudioService.textToSpeech("Stop! $dangerLabel ahead!", interrupt: true);
+      // Only speak danger if Active
+      if (maxDanger == "CRITICAL" && _isActive) {
+        if (_lastDangerAudioTime == null || DateTime.now().difference(_lastDangerAudioTime!).inSeconds > 3) {
+          if (dangerLabel != "person") {
+            _lastDangerAudioTime = DateTime.now();
+            _fishAudioService.textToSpeech("Stop! $dangerLabel ahead!", interrupt: true);
+          }
         }
       }
-      else if (_lastDangerStatus == "CRITICAL" && maxDanger == "SAFE") {
-        if (_queuedEnvironmentText != null) {
-          debugPrint("✅ Safe. Playing queued description.");
-          _fishAudioService.textToSpeech("Safe now. $_queuedEnvironmentText");
-          _queuedEnvironmentText = null;
-        }
-      }
-      _lastDangerStatus = maxDanger;
 
       stopwatch.stop();
       if (mounted) {
@@ -289,98 +387,21 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-// === VISUAL LOOP (Medium Priority) ===
-  Future<void> _visualLoop() async {
-    if (!_isActive || controller == null || !controller!.value.isInitialized) return;
-
-    // If Danger is active, don't even queue visuals.
-    if (_globalDangerStatus == "CRITICAL") return;
-
-    try {
-      // 1. Stop Stream to take Pic
-      if (controller!.value.isStreamingImages) {
-        await controller?.stopImageStream();
-      }
-
-      // 2. Take Pic
-      XFile imageFile = await controller!.takePicture();
-
-      // 3. CRITICAL CHECK: Did user press STOP while we were taking the pic?
-      if (!_isActive) {
-        File(imageFile.path).delete(); // Clean up
-        return; // EXIT IMMEDIATELY. DO NOT RESTART STREAM.
-      }
-
-      // 4. Restart Stream
-      await controller?.startImageStream((image) => _yoloLoop(image));
-
-      // 5. Process Image
-      String desc = await _geminiService.describeEnvironmentFromImage(imageFile);
-      File(imageFile.path).delete();
-
-      // 6. Speak
-      debugPrint("📸 Queuing Visual Description...");
-      _fishAudioService.textToSpeech(desc, interrupt: false);
-
-    } catch (e) {
-      debugPrint("Visual Error: $e");
-      // Attempt to recover stream if we are still active
-      if (_isActive && controller != null && !controller!.value.isStreamingImages) {
-        try {
-          await controller?.startImageStream((image) => _yoloLoop(image));
-        } catch (err) { /* Ignore */ }
-      }
-    }
-  }
-
-  // === MAP LOOP (Low Priority) ===
-  Future<void> _mapsLoop() async {
-    if (!_isActive || _globalDangerStatus == "CRITICAL") return;
-
-    try {
-      Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-      List<POI> pois = await _osmService.getNearbyPOIs(pos.latitude, pos.longitude);
-      final topPois = pois.take(3).toList(); // Take top 3
-
-      if (topPois.isNotEmpty) {
-        String desc = await _geminiService.convertToConversation(topPois);
-
-        // Add to Queue (interrupt: false)
-        // If Visual is speaking, this will wait until Visual is done!
-        debugPrint("🗺️ Queuing Map Description...");
-        _fishAudioService.textToSpeech("Nearby: $desc", interrupt: false);
-      }
-    } catch (e) {
-      debugPrint("Map Error: $e");
-    }
-  }
-
   @override
   void dispose() {
     controller?.dispose();
     vision.closeYoloModel();
-    _visualTimer?.cancel();
     _fishAudioService.dispose();
+    _accelerometerSubscription?.cancel();
+    _volumeSubscription?.cancel();
+    _lastGeminiImage?.delete();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     if (!_isLoaded) {
-      return Scaffold(
-        backgroundColor: Colors.black,
-        body: Center(child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (_statusText.contains("Error"))
-              const Icon(Icons.error, color: Colors.red, size: 50)
-            else
-              const CircularProgressIndicator(),
-            const SizedBox(height: 20),
-            Text(_statusText, style: const TextStyle(color: Colors.white)),
-          ],
-        )),
-      );
+      return const Scaffold(backgroundColor: Colors.black, body: Center(child: CircularProgressIndicator()));
     }
 
     final Size screenSize = MediaQuery.of(context).size;
@@ -438,34 +459,74 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
 
-          // 4. BUTTON
-          Positioned(
-            bottom: 40 + screenSize.height * 0.05, left: 20, right: 20,
-            child: SizedBox(
-              height: 72,
-              child: ElevatedButton.icon(
-                onPressed: _toggleSystem,
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: _isActive ? Colors.redAccent : Colors.blueAccent,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(36)),
-                    elevation: 10
+          // 4. BUTTON FEEDBACK (New!)
+          if (_buttonFeedback.isNotEmpty)
+            Positioned(
+              top: 130, left: 0, right: 0,
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(20)),
+                  child: Text(_buttonFeedback, style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
-                icon: Icon(_isActive ? Icons.stop_circle : Icons.play_circle, size: 30),
-                label: Text(
-                  _isActive ? "STOP GUIDING" : "START GUIDING",
-                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+            ),
+
+          // 5. BUTTON
+          Positioned(
+            bottom: 40 + screenSize.height * 0.05, left: 0, right: 0,
+            child: Center(
+              child: SizedBox(
+                height: 72,
+                width: 200,
+                child: ElevatedButton.icon(
+                  onPressed: _toggleSystem,
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: _isActive ? Colors.redAccent : Colors.blueAccent,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(36)),
+                      elevation: 10
+                  ),
+                  icon: Icon(_isActive ? Icons.stop_circle : Icons.play_circle, size: 30),
+                  label: Text(
+                    _isActive ? "STOP" : "START",
+                    style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                  ),
                 ),
               ),
             ),
           ),
 
-          Positioned(
-            bottom: 170, left: 20,
-            child: _isActive ? Text(
-              "FPS: $_fps | Inf: ${_inferenceMs}ms",
-              style: const TextStyle(color: Colors.white70, fontSize: 12),
-            ) : const SizedBox.shrink(),
-          ),
+          // 6. GEMINI PREVIEW
+          if (_lastGeminiImage != null)
+            Positioned(
+              bottom: 40, left: 20,
+              child: Container(
+                width: 100, height: 100,
+                decoration: BoxDecoration(
+                    border: Border.all(color: Colors.yellowAccent, width: 2),
+                    borderRadius: BorderRadius.circular(10),
+                    image: DecorationImage(
+                        image: FileImage(_lastGeminiImage!),
+                        fit: BoxFit.cover
+                    )
+                ),
+                child: const Align(
+                  alignment: Alignment.bottomCenter,
+                  child: Text("Vision", style: TextStyle(backgroundColor: Colors.black54, color: Colors.white, fontSize: 10)),
+                ),
+              ),
+            ),
+
+          // 7. STATS
+          if (_isActive)
+            Positioned(
+              bottom: 140, left: 0, right: 0,
+              child: Text(
+                "FPS: $_fps | Inf: ${_inferenceMs}ms",
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+            ),
         ],
       ),
     );
@@ -479,8 +540,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// ==================== HELPER CLASSES ====================
-
+// === HELPERS ===
 class DangerAnalyzer {
   static const double DANGER_ZONE_RATIO = 0.45;
   static const double APPROACH_THRESHOLD = 0.05;
@@ -489,25 +549,19 @@ class DangerAnalyzer {
 
   Map<String, String> analyze(int trackId, String label, double currentH, double frameH) {
     if (!targetClasses.contains(label)) return {"status": "IGNORE", "message": ""};
-
     double heightRatio = currentH / frameH;
     if (heightRatio > DANGER_ZONE_RATIO) return {"status": "CRITICAL", "message": "STOP! $label"};
-
     if (!_history.containsKey(trackId)) _history[trackId] = [];
     _history[trackId]!.add(currentH);
     if (_history[trackId]!.length > 10) _history[trackId]!.removeAt(0);
-
     if (_history[trackId]!.length >= 3) {
       double growth = (currentH - _history[trackId]![0]) / _history[trackId]![0];
       if (growth > APPROACH_THRESHOLD) return {"status": "WARNING", "message": "Approaching"};
     }
-
     if (["laptop", "tv", "cell phone"].contains(label)) return {"status": "INFO", "message": "Detected"};
     return {"status": "SAFE", "message": ""};
   }
-  void reset() {
-    _history.clear();
-  }
+  void reset() { _history.clear(); }
   void cleanOldHistory(Set<int> activeIds) => _history.removeWhere((key, value) => !activeIds.contains(key));
 }
 
@@ -515,7 +569,6 @@ class StickyTracker {
   int _nextId = 0;
   final Map<int, Offset> _objects = {};
   final Map<int, int> _disappearedCount = {};
-
   Map<int, int> update(List<Rect> rects) {
     if (rects.isEmpty) {
       _disappearedCount.updateAll((key, value) => value + 1);
@@ -526,7 +579,6 @@ class StickyTracker {
     Map<int, int> assignments = {};
     Set<int> usedIds = {};
     Set<int> usedInputs = {};
-
     if (_objects.isNotEmpty) {
       for (int i = 0; i < inputs.length; i++) {
         int? bestId;
@@ -545,7 +597,6 @@ class StickyTracker {
         }
       }
     }
-
     for (int i = 0; i < inputs.length; i++) {
       if (!usedInputs.contains(i)) {
         int id = _nextId++;
@@ -558,11 +609,7 @@ class StickyTracker {
     _cleanup();
     return assignments;
   }
-  void reset() {
-    _nextId = 0;
-    _objects.clear();
-    _disappearedCount.clear();
-  }
+  void reset() { _nextId = 0; _objects.clear(); _disappearedCount.clear(); }
   void _cleanup() {
     _objects.removeWhere((id, _) => (_disappearedCount[id] ?? 0) > 10);
     _disappearedCount.removeWhere((id, c) => c > 10);
@@ -576,31 +623,22 @@ class ResultsPainter extends CustomPainter {
   final double h;
   final double w;
   final Size screen;
-
   ResultsPainter(this.results, this.assignments, this.analyzer, this.h, this.w, this.screen);
-
   @override
   void paint(Canvas canvas, Size size) {
-    double scale = screen.width / h > screen.height / w ? screen.width / h : screen.height / w;
+    double scale = math.max(screen.width / h, screen.height / w);
     double dx = (screen.width - h * scale) / 2;
     double dy = (screen.height - w * scale) / 2;
-
     for (int i = 0; i < results.length; i++) {
       final box = results[i]["box"];
       int id = assignments[i] ?? -1;
       var analysis = analyzer.analyze(id, results[i]["tag"], box[3] - box[1], h);
       if (analysis['status'] == "IGNORE") continue;
-
-      Color c = analysis['status'] == "CRITICAL" ? Colors.red : (analysis['status'] == "WARNING" ? Colors.orange : Colors.green);
+      Color c = analysis['status'] == "CRITICAL" ? Colors.redAccent : (analysis['status'] == "WARNING" ? Colors.orangeAccent : Colors.greenAccent);
       final paint = Paint()..color = c..style = PaintingStyle.stroke..strokeWidth = 3.0;
-
       Rect r = Rect.fromLTRB(box[0] * scale + dx, box[1] * scale + dy, box[2] * scale + dx, box[3] * scale + dy);
       canvas.drawRect(r, paint);
-
-      TextPainter(
-          text: TextSpan(text: "${results[i]['tag']} ${analysis['status']}", style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
-          textDirection: TextDirection.ltr
-      )..layout()..paint(canvas, Offset(r.left, r.top - 20));
+      TextPainter(text: TextSpan(text: "${results[i]['tag']} ${analysis['status']}", style: const TextStyle(color: Colors.black, fontWeight: FontWeight.bold)), textDirection: TextDirection.ltr)..layout()..paint(canvas, Offset(r.left, r.top - 20));
     }
   }
   @override
